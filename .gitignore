@@ -1,0 +1,10 @@
+/target/
+/cache/
+/dist/
+/config.yaml
+/script/hls2dash.pid
+/script/hls2dash.log
+/script/.smoke/
+/script/.review_selections.tsv
+**/*.tmp
+.DS_Store

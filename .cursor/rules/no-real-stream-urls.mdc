@@ -1,0 +1,13 @@
+---
+description: Never commit real stream URLs or config.yaml
+alwaysApply: true
+---
+
+# No real stream origins in git
+
+Hard project rules (also in `doc/layout.md`):
+
+1. **`config.yaml` is local-only** — must stay in `.gitignore`. Never `git add config.yaml`. Ship only `config.example.yaml`.
+2. **No real stream locations in the repo** — do not put real HLS/RTMP origin IPs, hostnames, paths, or production URLs in any tracked file (`config.example.yaml`, docs, scripts, READMEs, comments). Use placeholders like `http://origin.example.com/live/stream/index.m3u8` only.
+3. **Real URLs belong in** local `config.yaml` or env vars (`SMOKE_HLS_URL`, `BASE_URL`), never in commits.
+4. **History counts** — if a real origin is committed, rewrite history and force-push; a follow-up sanitize commit is not enough for a public repo.
