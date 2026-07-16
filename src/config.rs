@@ -36,8 +36,47 @@ pub struct Config {
     /// Global pull reconnect delay (seconds) for every channel.
     #[serde(default = "default_reconnect_secs")]
     pub reconnect_secs: u64,
+    /// Frame-loss recovery and safe-cache retention knobs.
+    #[serde(default)]
+    pub recovery: RecoveryConfig,
     #[serde(default)]
     pub pull: Vec<PullSource>,
+}
+
+/// Frame-loss recovery and cache retention settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RecoveryConfig {
+    /// Per-segment HTTP fetch retries before skip/fail.
+    #[serde(default = "default_segment_fetch_retries")]
+    pub segment_fetch_retries: u32,
+    /// Delay between segment fetch retries (milliseconds).
+    #[serde(default = "default_segment_fetch_retry_ms")]
+    pub segment_fetch_retry_ms: u64,
+    /// Skip missing segments instead of aborting the pull session.
+    #[serde(default = "default_true")]
+    pub skip_missing_segments: bool,
+    /// Resync MPEG-TS packets on sync-byte loss instead of truncating.
+    #[serde(default = "default_true")]
+    pub ts_resync_packets: bool,
+    /// DASH: drop samples until the next video keyframe after push failure.
+    #[serde(default = "default_true")]
+    pub dash_skip_to_keyframe: bool,
+    /// Extra segments kept below the egress watermark before prune/janitor delete.
+    #[serde(default = "default_retention_grace_segments")]
+    pub retention_grace_segments: u64,
+}
+
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            segment_fetch_retries: default_segment_fetch_retries(),
+            segment_fetch_retry_ms: default_segment_fetch_retry_ms(),
+            skip_missing_segments: true,
+            ts_resync_packets: true,
+            dash_skip_to_keyframe: true,
+            retention_grace_segments: default_retention_grace_segments(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +107,9 @@ pub struct MpegTsConfig {
     /// Pace HTTP egress at ~1× media realtime (uses EXTINF / stored duration).
     #[serde(default = "default_true")]
     pub pace_egress: bool,
+    /// Sub-chunk interval for smooth paced egress (milliseconds).
+    #[serde(default = "default_egress_chunk_ms")]
+    pub egress_chunk_ms: u64,
     /// Playlist poll factor vs TARGETDURATION when filling the buffer (smaller = more aggressive).
     #[serde(default = "default_ingest_poll_factor")]
     pub ingest_poll_factor: f64,
@@ -82,6 +124,7 @@ impl Default for MpegTsConfig {
             send_queue: default_mpegts_send_queue(),
             poll_interval_secs: default_mpegts_poll_interval_secs(),
             pace_egress: true,
+            egress_chunk_ms: default_egress_chunk_ms(),
             ingest_poll_factor: default_ingest_poll_factor(),
         }
     }
@@ -170,6 +213,22 @@ fn default_true() -> bool {
 
 fn default_ingest_poll_factor() -> f64 {
     0.25
+}
+
+fn default_egress_chunk_ms() -> u64 {
+    250
+}
+
+fn default_segment_fetch_retries() -> u32 {
+    2
+}
+
+fn default_segment_fetch_retry_ms() -> u64 {
+    200
+}
+
+fn default_retention_grace_segments() -> u64 {
+    2
 }
 
 impl Config {

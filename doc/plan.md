@@ -40,4 +40,5 @@ Runtime registry is in-memory; reboot reloads `config.yaml` only (API mutations 
 
 ## Architecture
 
-HLS pull → MPEG-TS demux (H.264+AAC) → CMAF `DashPackager` → HTTP DASH egress.
+- **dash**：HLS pull → MPEG-TS demux (H.264+AAC) → CMAF `DashPackager` → HTTP DASH egress.
+- **mpegts**：HLS pull → `TsStitcher` → HTTP continuous MPEG-TS；`pace_egress` 時在 EXTINF 內分段平滑送出（[mpegts-smooth-egress.md](./mpegts-smooth-egress.md)）。

@@ -58,6 +58,17 @@ curl -s -X DELETE http://127.0.0.1:8080/api/channels/demo
 SMOKE_HLS_URL="http://origin.example.com/live/stream/index.m3u8" ./script/smoke_test.sh
 ```
 
+## 解碼層監控（MPEG-TS）
+
+錄製 N 秒 `/mpegts`，用 ffprobe 檢查幀 PTS gap，再用 ffmpeg 全解碼抓 SPS/corrupt 等 warning。需本機有 `ffmpeg` / `ffprobe`：
+
+```bash
+./script/monitor_decode_ffprobe.py http://127.0.0.1:8080/live/demo/mpegts 180
+MPEGTS_URL="http://127.0.0.1:8080/live/demo/mpegts" ./script/monitor_decode_ffprobe.py
+```
+
+exit 0 = 大致正常；exit 2 = 解碼層有明顯幀 gap 或大量 warning。
+
 ## 互動選台（VLC）
 
 指定範圍（例如 `20 50` → `sh_020`–`sh_050`），逐一用 VLC 播放；選 `y` 並輸入 channel id 後，**append** 到 `config_pre.yaml`（既有 `pull:` **不會被覆寫**；僅第一次不存在時建立骨架）。

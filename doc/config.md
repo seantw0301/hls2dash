@@ -29,6 +29,7 @@ mpegts:
   send_queue: 32
   poll_interval_secs: 2
   pace_egress: true
+  egress_chunk_ms: 250
   ingest_poll_factor: 0.25
 
 reconnect_secs: 3
@@ -52,7 +53,8 @@ pull:
 | `mpegts.max_segment_lag` | 否 | `10` | 落後過遠時跳到 safe edge |
 | `mpegts.send_queue` | 否 | `32` | 每連線送出佇列深度 |
 | `mpegts.poll_interval_secs` | 否 | `2` | 等待下一片時的 poll 間隔 |
-| `mpegts.pace_egress` | 否 | `true` | 依 EXTINF 以 ~1× 媒體時間送出，避免 burst |
+| `mpegts.pace_egress` | 否 | `true` | 依 EXTINF 以 ~1× 媒體時間送出；`true` 時啟用分段平滑（見 [mpegts-smooth-egress.md](./mpegts-smooth-egress.md)） |
+| `mpegts.egress_chunk_ms` | 否 | `250` | 平滑送出子塊目標間隔（ms，50–2000）；僅 `pace_egress: true` 時生效 |
 | `mpegts.ingest_poll_factor` | 否 | `0.25` | playlist poll = TARGETDURATION × factor（越小越積極） |
 | `reconnect_secs` | 否 | `3` | 全域拉流失敗重試間隔 |
 | `pull[].url` | 是 | — | 來源 HLS（路徑上的 `sh_012` 等**不是**播放名） |

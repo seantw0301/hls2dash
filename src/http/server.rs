@@ -2,6 +2,7 @@
 
 use super::channel_api;
 use crate::channel::ChannelRegistry;
+use crate::cache::RetentionRegistry;
 use crate::config::{Config, OutputMode};
 use crate::mpegts::{channel_mpegts_ready, spawn_mpegts_stream, MpegTsStreamOpts};
 use axum::Json;
@@ -23,6 +24,7 @@ pub struct AppState {
     pub cache_dir: PathBuf,
     pub registry: ChannelRegistry,
     pub cfg: Arc<Config>,
+    pub retention: Arc<RetentionRegistry>,
 }
 
 impl FromRef<AppState> for ChannelRegistry {
@@ -46,7 +48,11 @@ struct ChannelInfo {
 }
 
 /// Serve live egress + channel APIs over HTTP.
-pub async fn run(cfg: Arc<Config>, registry: ChannelRegistry) -> anyhow::Result<()> {
+pub async fn run(
+    cfg: Arc<Config>,
+    registry: ChannelRegistry,
+    retention: Arc<RetentionRegistry>,
+) -> anyhow::Result<()> {
     let addr = cfg.dash_addr()?;
     let live_root = cfg.cache.dir.join("live");
     std::fs::create_dir_all(&live_root)?;
@@ -55,6 +61,7 @@ pub async fn run(cfg: Arc<Config>, registry: ChannelRegistry) -> anyhow::Result<
         cache_dir: cfg.cache.dir.clone(),
         registry,
         cfg: Arc::clone(&cfg),
+        retention,
     };
 
     let cors = CorsLayer::new()
@@ -177,6 +184,9 @@ async fn serve_media(
     if !crate::config::is_safe_channel(&channel) || !is_safe_file(&file) {
         return (StatusCode::BAD_REQUEST, "invalid path").into_response();
     }
+    if let Some(seg_num) = parse_served_seg_number(&file) {
+        state.retention.touch_seg(&channel, seg_num);
+    }
     let path = state.cache_dir.join("live").join(&channel).join(&file);
     let content_type = if file.ends_with(".mp4") || file.ends_with(".m4s") {
         "video/mp4"
@@ -209,7 +219,7 @@ async fn serve_mpegts_stream(
     }
 
     let mut rx = spawn_mpegts_stream(
-        channel,
+        channel.clone(),
         channel_dir,
         MpegTsStreamOpts {
             poll_interval_secs: m.poll_interval_secs,
@@ -218,8 +228,10 @@ async fn serve_mpegts_stream(
             max_segment_lag: m.max_segment_lag,
             send_queue: m.send_queue,
             pace_egress: m.pace_egress,
+            egress_chunk_ms: m.egress_chunk_ms,
             default_segment_duration_secs: state.cfg.cache.segment_duration_secs,
         },
+        Arc::clone(&state.retention),
     );
 
     let stream = async_stream::stream! {
@@ -275,4 +287,12 @@ fn is_safe_file(file: &str) -> bool {
             || file.ends_with(".m4s")
             || file.ends_with(".mp4")
             || file.ends_with(".mpd"))
+}
+
+fn parse_served_seg_number(file: &str) -> Option<u64> {
+    let rest = file.strip_prefix("seg_")?;
+    let num = rest
+        .strip_suffix(".m4s")
+        .or_else(|| rest.strip_suffix(".ts"))?;
+    num.parse().ok()
 }

@@ -22,10 +22,20 @@ mpegts:
   send_queue: 32
   poll_interval_secs: 2
   pace_egress: true
+  egress_chunk_ms: 250
   ingest_poll_factor: 0.25
 
 # Global: fail → wait N seconds → retry (all channels).
 reconnect_secs: 3
+
+# Frame-loss recovery and safe cache retention.
+recovery:
+  segment_fetch_retries: 2
+  segment_fetch_retry_ms: 200
+  skip_missing_segments: true
+  ts_resync_packets: true
+  dash_skip_to_keyframe: true
+  retention_grace_segments: 2
 
 pull:
   # url path (e.g. sh_012) ≠ playback channel name.

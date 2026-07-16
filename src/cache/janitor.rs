@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::cache::RetentionRegistry;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,7 +14,7 @@ const MAX_DELETIONS_PER_CHANNEL_SWEEP: usize = 100;
 /// Preserves `init.mp4` while a live window still has segments. When every
 /// `seg_*.m4s` has expired but `index.mpd` remains, the MPD (and orphan init)
 /// are removed so HTTP does not keep serving a ghost timeline after ingest dies.
-pub async fn run(cfg: Arc<Config>) {
+pub async fn run(cfg: Arc<Config>, retention: Arc<RetentionRegistry>) {
     let interval = Duration::from_secs(cfg.cache.cleanup_interval_secs.max(1));
     let ttl = Duration::from_secs(cfg.cache.effective_ttl_secs());
     let live_root = cfg.cache.dir.join("live");
@@ -29,7 +30,8 @@ pub async fn run(cfg: Arc<Config>) {
     loop {
         match tokio::task::spawn_blocking({
             let live_root = live_root.clone();
-            move || sweep(&live_root, ttl)
+            let retention = Arc::clone(&retention);
+            move || sweep(&live_root, ttl, &retention)
         })
         .await
         {
@@ -41,7 +43,7 @@ pub async fn run(cfg: Arc<Config>) {
 }
 
 /// Scan channel dirs under `live_root` and delete expired media segments (batched).
-fn sweep(live_root: &Path, ttl: Duration) -> usize {
+fn sweep(live_root: &Path, ttl: Duration, retention: &RetentionRegistry) -> usize {
     if !live_root.is_dir() {
         return 0;
     }
@@ -58,7 +60,18 @@ fn sweep(live_root: &Path, ttl: Duration) -> usize {
         if !channel_dir.is_dir() {
             continue;
         }
-        removed += sweep_channel(&channel_dir, now, ttl, MAX_DELETIONS_PER_CHANNEL_SWEEP);
+        let channel_id = entry
+            .file_name()
+            .into_string()
+            .unwrap_or_default();
+        removed += sweep_channel(
+            &channel_id,
+            &channel_dir,
+            now,
+            ttl,
+            retention,
+            MAX_DELETIONS_PER_CHANNEL_SWEEP,
+        );
     }
 
     if removed > 0 {
@@ -67,10 +80,14 @@ fn sweep(live_root: &Path, ttl: Duration) -> usize {
     removed
 }
 
-/// Delete expired `seg_*.m4s` (and stray `.tmp`) files in one channel directory.
-/// If no segments remain and `index.mpd` is older than `ttl`, drop the ghost MPD
-/// (and `init.mp4`) so clients get 404 instead of a dead SegmentTimeline.
-fn sweep_channel(channel_dir: &Path, now: SystemTime, ttl: Duration, mut budget: usize) -> usize {
+fn sweep_channel(
+    channel_id: &str,
+    channel_dir: &Path,
+    now: SystemTime,
+    ttl: Duration,
+    retention: &RetentionRegistry,
+    mut budget: usize,
+) -> usize {
     if budget == 0 {
         return 0;
     }
@@ -102,8 +119,6 @@ fn sweep_channel(channel_dir: &Path, now: SystemTime, ttl: Duration, mut budget:
             continue;
         }
 
-        // Remove only stale atomic-write temps. Packager writes and renames these
-        // concurrently, so unconditional deletion can race an active MPD/segment write.
         if name.ends_with(".tmp") {
             if file_is_expired(&path, now, Duration::from_secs(60)) {
                 expired_tmps.push(path);
@@ -117,10 +132,19 @@ fn sweep_channel(channel_dir: &Path, now: SystemTime, ttl: Duration, mut budget:
             continue;
         }
 
+        let seg_num = parse_seg_number(name);
+        let protected = seg_num.is_some_and(|n| !retention.may_delete_seg(channel_id, n));
+
+        if protected {
+            if name.ends_with(".m4s") || name.ends_with(".ts") {
+                segment_remaining += 1;
+            }
+            continue;
+        }
+
         if file_is_expired(&path, now, ttl) {
             expired_segs.push(path);
         } else if name.ends_with(".m4s") || name.ends_with(".ts") {
-            // `.dur` sidecars do not count toward live segment presence.
             segment_remaining += 1;
         }
     }
@@ -151,8 +175,6 @@ fn sweep_channel(channel_dir: &Path, now: SystemTime, ttl: Duration, mut budget:
         }
     }
 
-    // Only treat as orphan when nothing live remains and every expired seg was
-    // actually removed (budget may truncate a large directory).
     if segment_remaining == 0 && expired_left == 0 {
         if let Some(mpd) = mpd_path {
             if file_is_expired(&mpd, now, ttl) && budget > 0 {
@@ -175,6 +197,15 @@ fn sweep_channel(channel_dir: &Path, now: SystemTime, ttl: Duration, mut budget:
     }
 
     removed
+}
+
+fn parse_seg_number(name: &str) -> Option<u64> {
+    let rest = name.strip_prefix("seg_")?;
+    let num = rest
+        .strip_suffix(".m4s")
+        .or_else(|| rest.strip_suffix(".ts"))
+        .or_else(|| rest.strip_suffix(".dur"))?;
+    num.parse().ok()
 }
 
 /// Return true if the file's mtime is older than `ttl` relative to `now`.

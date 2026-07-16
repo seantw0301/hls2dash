@@ -1,8 +1,9 @@
 //! Runtime channel registry: CRUD + instant enable/disable.
 
 use crate::config::{
-    is_safe_channel, CacheConfig, Config, MpegTsConfig, OutputMode, PullSource,
+    is_safe_channel, CacheConfig, Config, MpegTsConfig, OutputMode, PullSource, RecoveryConfig,
 };
+use crate::cache::RetentionRegistry;
 use crate::hls::{self, ErrorSlot};
 use anyhow::{bail, Result};
 use reqwest::Client;
@@ -44,12 +45,14 @@ pub struct ChannelRegistry {
     reconnect_secs: u64,
     output_mode: OutputMode,
     mpegts: MpegTsConfig,
+    recovery: RecoveryConfig,
+    retention: Arc<RetentionRegistry>,
     http: Client,
 }
 
 impl ChannelRegistry {
     /// Create an empty registry bound to cache settings.
-    pub fn new(cfg: &Config) -> Self {
+    pub fn new(cfg: &Config, retention: Arc<RetentionRegistry>) -> Self {
         Self {
             inner: Arc::new(AsyncMutex::new(HashMap::new())),
             cache_dir: cfg.cache.dir.clone(),
@@ -57,6 +60,8 @@ impl ChannelRegistry {
             reconnect_secs: cfg.reconnect_secs.max(1),
             output_mode: cfg.output_mode,
             mpegts: cfg.mpegts.clone(),
+            recovery: cfg.recovery.clone(),
+            retention,
             http: Client::builder()
                 .user_agent("hls2dash/0.1")
                 .build()
@@ -188,6 +193,7 @@ impl ChannelRegistry {
         entry.enabled = false;
         self.stop_worker(&mut entry).await;
         drop(guard);
+        self.retention.remove_channel(id);
         crate::cache::remove_channel_dir(&self.cache_dir, id);
         Ok(())
     }
@@ -236,6 +242,8 @@ impl ChannelRegistry {
         let reconnect_secs = self.reconnect_secs;
         let output_mode = self.output_mode;
         let mpegts = self.mpegts.clone();
+        let recovery = self.recovery.clone();
+        let retention = Arc::clone(&self.retention);
         let last_error = Arc::clone(&entry.last_error);
         let token = cancel.clone();
 
@@ -253,6 +261,8 @@ impl ChannelRegistry {
                 reconnect_secs,
                 output_mode,
                 mpegts,
+                recovery,
+                retention,
                 token,
                 last_error,
             )

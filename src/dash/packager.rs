@@ -1,3 +1,4 @@
+use crate::cache::RetentionRegistry;
 use crate::config::CacheConfig;
 use crate::dash::fmp4_duration::{first_tfdt_base_time, first_traf_duration_ticks};
 use crate::dash::mpd::{self, MpdTrackInfo, TimelineEntry};
@@ -8,6 +9,7 @@ use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 use transmux::{CodecConfig, Sample, Segmenter, TrackSpec};
 
@@ -17,6 +19,8 @@ const PRUNE_GRACE_SEGMENTS: u64 = 2;
 
 pub struct DashPackager {
     out_dir: PathBuf,
+    channel_id: String,
+    retention: Arc<RetentionRegistry>,
     writer: PackagerWriter,
     /// Configured cut target (fallback when a segment's media duration cannot be parsed).
     segment_duration_secs: f64,
@@ -43,22 +47,43 @@ pub struct DashPackager {
     started_on_video_sync: bool,
     /// Coalesce MPD rewrites to at most once per `drain_ready` batch.
     mpd_dirty: bool,
+    /// Drop non-keyframes until the next video sync sample.
+    sync_recovery: bool,
+    skip_to_keyframe: bool,
+    /// Defer segment deletes until after MPD no longer references them.
+    pending_deletes: Vec<u64>,
 }
 
 impl DashPackager {
     /// Create a packager for a fresh publish: clear leftover cache files and start at seg 1.
-    pub fn new(out_dir: PathBuf, cache: &CacheConfig) -> Result<Self> {
-        Self::create(out_dir, cache, /*clear=*/ true)
+    pub fn new(
+        out_dir: PathBuf,
+        cache: &CacheConfig,
+        channel_id: &str,
+        retention: Arc<RetentionRegistry>,
+        skip_to_keyframe: bool,
+    ) -> Result<Self> {
+        Self::create(out_dir, cache, channel_id, retention, /*clear=*/ true, skip_to_keyframe)
     }
 
-    /// Create a packager after process restart for RTMP pull: continue numbering but wipe
-    /// leftover segments/MPD. A brand-new Segmenter always starts tfdt at 0, so old media
-    /// files are never compatible with a new init — keeping them would desync playback.
-    pub fn resume(out_dir: PathBuf, cache: &CacheConfig) -> Result<Self> {
-        Self::create(out_dir, cache, /*clear=*/ false)
+    pub fn resume(
+        out_dir: PathBuf,
+        cache: &CacheConfig,
+        channel_id: &str,
+        retention: Arc<RetentionRegistry>,
+        skip_to_keyframe: bool,
+    ) -> Result<Self> {
+        Self::create(out_dir, cache, channel_id, retention, /*clear=*/ false, skip_to_keyframe)
     }
 
-    fn create(out_dir: PathBuf, cache: &CacheConfig, clear: bool) -> Result<Self> {
+    fn create(
+        out_dir: PathBuf,
+        cache: &CacheConfig,
+        channel_id: &str,
+        retention: Arc<RetentionRegistry>,
+        clear: bool,
+        skip_to_keyframe: bool,
+    ) -> Result<Self> {
         let next_segment_number = if clear {
             clear_channel_dir(&out_dir)?;
             1
@@ -78,6 +103,8 @@ impl DashPackager {
 
         Ok(Self {
             out_dir,
+            channel_id: channel_id.to_string(),
+            retention,
             writer,
             segment_duration_secs: cache.segment_duration_secs,
             window_segments: cache.window_segments,
@@ -93,7 +120,43 @@ impl DashPackager {
             pending_sample_bytes: 0,
             started_on_video_sync: false,
             mpd_dirty: false,
+            sync_recovery: false,
+            skip_to_keyframe,
+            pending_deletes: Vec::new(),
         })
+    }
+
+    /// Advance media timeline without producing an fMP4 (missing/corrupt HLS segment).
+    pub fn inject_gap(&mut self, duration_ticks: u64) {
+        let duration_ticks = duration_ticks.max(1);
+        let start_ticks = self.next_start_ticks;
+        self.next_start_ticks = start_ticks.saturating_add(duration_ticks);
+        if self.segmenter.is_some() && self.started_on_video_sync {
+            let number = self.next_segment_number;
+            self.timeline.push_back(TimelineEntry {
+                number,
+                start_ticks,
+                duration_ticks,
+            });
+            self.next_segment_number = number.saturating_add(1);
+            self.mpd_dirty = true;
+            warn!(
+                number,
+                start_ticks,
+                duration_ticks,
+                "injected DASH timeline gap (no media segment)"
+            );
+            self.prune_window();
+            self.flush_mpd_if_dirty();
+        }
+    }
+
+    /// Enter keyframe-wait mode after TS discontinuity without HLS reset.
+    pub fn begin_sync_recovery(&mut self) {
+        if !self.sync_recovery {
+            warn!(dir = %self.out_dir.display(), "TS discontinuity; waiting for keyframe");
+        }
+        self.sync_recovery = true;
     }
 
     /// Ingest one access unit (codec config or sample) into the live DASH pipeline.
@@ -178,7 +241,9 @@ impl DashPackager {
         self.pending_samples.clear();
         self.pending_sample_bytes = 0;
         self.started_on_video_sync = false;
+        self.sync_recovery = false;
         self.mpd_dirty = false;
+        self.pending_deletes.clear();
         self.availability_start_time = None;
         self.timeline.clear();
         self.next_start_ticks = 0;
@@ -230,7 +295,9 @@ impl DashPackager {
         self.pending_samples.clear();
         self.pending_sample_bytes = 0;
         self.started_on_video_sync = false;
+        self.sync_recovery = false;
         self.mpd_dirty = false;
+        self.pending_deletes.clear();
         self.availability_start_time = None;
 
         self.purge_generation_files();
@@ -247,7 +314,7 @@ impl DashPackager {
         }
     }
 
-    fn build_segmenter(
+    pub(crate) fn build_segmenter(
         video: CodecConfig,
         audio: CodecConfig,
         segment_duration_secs: f64,
@@ -345,6 +412,13 @@ impl DashPackager {
     }
 
     fn push_ready_sample(&mut self, track_id: u32, sample: Sample) {
+        if self.sync_recovery && self.skip_to_keyframe {
+            if track_id != VIDEO_TRACK_ID || !sample.is_sync {
+                return;
+            }
+            self.sync_recovery = false;
+            info!(dir = %self.out_dir.display(), "sync recovery: resumed on keyframe");
+        }
         if !self.started_on_video_sync {
             if track_id != VIDEO_TRACK_ID || !sample.is_sync {
                 return;
@@ -356,6 +430,9 @@ impl DashPackager {
         };
         if let Err(err) = seg.push(track_id, sample) {
             warn!("segmenter push track {track_id}: {err}");
+            if self.skip_to_keyframe {
+                self.sync_recovery = true;
+            }
             return;
         }
         self.drain_ready();
@@ -392,10 +469,13 @@ impl DashPackager {
     /// Drop segment files that fall outside the on-disk sliding window (+ grace).
     fn prune_window(&mut self) {
         let keep = self.window_segments as u64 + PRUNE_GRACE_SEGMENTS;
+        let floor = self.retention.safe_prune_floor(&self.channel_id);
         while self.next_segment_number.saturating_sub(self.window_start) > keep {
             let old = self.window_start;
+            if old >= floor {
+                break;
+            }
             self.window_start = self.window_start.saturating_add(1);
-            self.writer.delete(&format!("seg_{old}.m4s"));
             while self
                 .timeline
                 .front()
@@ -403,6 +483,7 @@ impl DashPackager {
             {
                 self.timeline.pop_front();
             }
+            self.pending_deletes.push(old);
             self.mpd_dirty = true;
         }
     }
@@ -422,6 +503,10 @@ impl DashPackager {
             return;
         }
         let entries: Vec<TimelineEntry> = self.timeline.iter().copied().collect();
+        if let Some(first) = entries.first() {
+            self.retention
+                .set_mpd_start(&self.channel_id, first.number);
+        }
         // Anchor AST exactly once per generation, then hold it constant so the
         // player's mapping from media time to wall clock never shifts.
         let ast = *self
@@ -431,6 +516,23 @@ impl DashPackager {
         let audio = MpdTrackInfo::from_audio(audio_cfg);
         let xml = mpd::render_live_mpd(&entries, ast, &video, Some(&audio));
         self.writer.enqueue("index.mpd", xml.into_bytes());
+        self.flush_pending_deletes();
+    }
+
+    fn flush_pending_deletes(&mut self) {
+        if self.pending_deletes.is_empty() {
+            return;
+        }
+        let floor = self.retention.safe_prune_floor(&self.channel_id);
+        let mut remaining = Vec::new();
+        for old in self.pending_deletes.drain(..) {
+            if old < floor {
+                self.writer.delete(&format!("seg_{old}.m4s"));
+            } else {
+                remaining.push(old);
+            }
+        }
+        self.pending_deletes = remaining;
     }
 }
 
@@ -523,6 +625,8 @@ fn parse_seg_number(name: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::RetentionRegistry;
+    use std::sync::Arc;
     use tempfile::tempdir;
     use transmux::{
         AVCConfigurationBox, AVCDecoderConfigurationRecord, EsdsBox,
@@ -586,6 +690,10 @@ mod tests {
         }
     }
 
+    fn test_retention() -> Arc<RetentionRegistry> {
+        Arc::new(RetentionRegistry::new(2))
+    }
+
     #[test]
     fn parse_seg_number_reads_media_names() {
         assert_eq!(parse_seg_number("seg_42.m4s"), Some(42));
@@ -621,7 +729,14 @@ mod tests {
             .build()
             .unwrap();
         let packager = rt.block_on(async {
-            let p = DashPackager::resume(dir.path().to_path_buf(), &cache).unwrap();
+            let p = DashPackager::resume(
+                dir.path().to_path_buf(),
+                &cache,
+                "test",
+                test_retention(),
+                true,
+            )
+            .unwrap();
             // Give wipe a moment; wipe is sync before spawn.
             p
         });
@@ -662,7 +777,14 @@ mod tests {
             ttl_secs: None,
             cleanup_interval_secs: 10,
         };
-        let mut packager = DashPackager::new(dir.path().to_path_buf(), &cache).unwrap();
+        let mut packager = DashPackager::new(
+            dir.path().to_path_buf(),
+            &cache,
+            "test",
+            test_retention(),
+            true,
+        )
+        .unwrap();
         packager.video_config = Some(fake_avc(0x4D, 640, 360));
         packager.audio_config = Some(fake_aac(44100));
         packager.next_segment_number = 50;
@@ -707,7 +829,14 @@ mod tests {
             ttl_secs: None,
             cleanup_interval_secs: 10,
         };
-        let mut packager = DashPackager::new(dir.path().to_path_buf(), &cache).unwrap();
+        let mut packager = DashPackager::new(
+            dir.path().to_path_buf(),
+            &cache,
+            "test",
+            test_retention(),
+            true,
+        )
+        .unwrap();
         packager.video_config = Some(fake_avc(0x4D, 640, 360));
         packager.audio_config = Some(fake_aac(44100));
         packager.next_segment_number = 50;
@@ -765,7 +894,14 @@ mod tests {
             ttl_secs: None,
             cleanup_interval_secs: 10,
         };
-        let mut packager = DashPackager::new(dir.path().to_path_buf(), &cache).unwrap();
+        let mut packager = DashPackager::new(
+            dir.path().to_path_buf(),
+            &cache,
+            "test",
+            test_retention(),
+            true,
+        )
+        .unwrap();
         let video = fake_avc(0x4D, 640, 360);
         let audio = fake_aac(44100);
         packager
@@ -804,5 +940,41 @@ mod tests {
         assert!(dir.path().join("seg_1.m4s").exists() || next_before == 1);
         packager.finish().await;
         assert!(dir.path().join("seg_1.m4s").exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inject_gap_advances_timeline() {
+        let dir = tempdir().unwrap();
+        let cache = CacheConfig {
+            dir: dir.path().to_path_buf(),
+            segment_duration_secs: 2.0,
+            window_segments: 90,
+            ttl_secs: None,
+            cleanup_interval_secs: 10,
+        };
+        let mut packager = DashPackager::new(
+            dir.path().to_path_buf(),
+            &cache,
+            "test",
+            test_retention(),
+            true,
+        )
+        .unwrap();
+        packager.next_start_ticks = 5000;
+        packager.inject_gap(2000);
+        assert_eq!(packager.next_start_ticks, 7000);
+
+        packager.started_on_video_sync = true;
+        packager.segmenter = DashPackager::build_segmenter(
+            fake_avc(0x4D, 640, 360),
+            fake_aac(44100),
+            2.0,
+        );
+        packager.next_start_ticks = 8000;
+        packager.inject_gap(1500);
+        assert_eq!(packager.next_start_ticks, 9500);
+        assert_eq!(packager.timeline.len(), 1);
+        assert_eq!(packager.timeline[0].start_ticks, 8000);
+        assert_eq!(packager.timeline[0].duration_ticks, 1500);
     }
 }

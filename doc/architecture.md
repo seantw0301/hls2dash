@@ -25,15 +25,15 @@
     └─ mpegts
          TsStitcher（CC rewrite + seg_N.dur）→ cache/…/seg_N.ts
          → HTTP /live/<ch>/mpegts
-           (min_buffer → holdback jitter buffer → paced 1× egress)
-           來源 HLS 卡頓時由磁碟 buffer 吸收，不因 ingest 延遲而 burst
+           (min_buffer → holdback jitter buffer → smooth paced egress)
+           來源 HLS 卡頓時由磁碟 buffer 吸收，egress 在 EXTINF 內均勻切片送出
 ```
 
 ### mpegts 緩衝與流速
 
 1. **Ingest**：較密的 playlist poll（`ingest_poll_factor`），啟動時多抓 holdback+min_buffer 片填滿磁碟緩衝。
 2. **Buffer**：`live_holdback_segments` 讓客戶端落在 live edge 後方；`min_buffer_segments` 未滿前回 503。
-3. **Egress**：依 `seg_N.dur`（EXTINF）以約 1× realtime 送出；underrun 恢復後重新錨定節奏，不一次吐多片。
+3. **Egress**（`pace_egress: true`）：每片 `seg_N.ts` 在 `seg_N.dur`（EXTINF）內**分段平滑送出**——依 `egress_chunk_ms` 切成 188-byte 對齊子塊、均勻間隔寫入連線，避免整片 burst 後長睡。underrun 恢復後重新錨定節奏，不追趕多片。詳見 [mpegts-smooth-egress.md](./mpegts-smooth-egress.md)。
 
 ## 控制面
 

@@ -71,23 +71,31 @@ async fn main() -> Result<()> {
         "hls2dash starting"
     );
 
-    let registry = ChannelRegistry::new(&cfg);
+    let retention = Arc::new(cache::RetentionRegistry::new(
+        cfg.recovery.retention_grace_segments,
+    ));
+
+    let registry = ChannelRegistry::new(&cfg, Arc::clone(&retention));
     registry.seed_from_config(&cfg.pull).await?;
 
     let http_cfg = Arc::clone(&cfg);
     let janitor_cfg = Arc::clone(&cfg);
+    let janitor_retention = Arc::clone(&retention);
     let http_registry = registry.clone();
+    let http_retention = Arc::clone(&retention);
 
     let http_task = tokio::spawn(supervise("http", move || {
         let cfg = Arc::clone(&http_cfg);
         let registry = http_registry.clone();
-        async move { http::run(cfg, registry).await }
+        let retention = Arc::clone(&http_retention);
+        async move { http::run(cfg, registry, retention).await }
     }));
 
     let janitor_task = tokio::spawn(supervise("cache-janitor", move || {
         let cfg = Arc::clone(&janitor_cfg);
+        let retention = Arc::clone(&janitor_retention);
         async move {
-            cache::run(cfg).await;
+            cache::run(cfg, retention).await;
             Ok(())
         }
     }));

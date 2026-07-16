@@ -1,20 +1,20 @@
 //! Stitch HLS MPEG-TS segments into a continuous live TS cache.
-//!
-//! Origin `.ts` segments usually restart continuity counters each cut. This
-//! module rewrites CC across segments and writes numbered `seg_N.ts` files for
-//! the `/live/<channel>/mpegts` HTTP streamer — **no CMAF remux**.
 
 use super::continuous::ContinuityState;
+use super::repair::{align_ts_packets_truncate, repair_ts_packets};
+use crate::cache::RetentionRegistry;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
-
-const TS_PACKET_SIZE: usize = 188;
+use std::sync::Arc;
+use tracing::{debug, info, warn};
 
 /// Writes continuous MPEG-TS segments under `out_dir` (`seg_1.ts`, …).
 pub struct TsStitcher {
     out_dir: PathBuf,
+    channel_id: String,
+    retention: Arc<RetentionRegistry>,
+    ts_resync: bool,
     window_segments: usize,
     continuity: ContinuityState,
     next_segment_number: u64,
@@ -23,7 +23,13 @@ pub struct TsStitcher {
 
 impl TsStitcher {
     /// Resume numbering after wipe of leftover media (fresh session).
-    pub fn resume(out_dir: PathBuf, window_segments: usize) -> Result<Self> {
+    pub fn resume(
+        out_dir: PathBuf,
+        window_segments: usize,
+        channel_id: &str,
+        retention: Arc<RetentionRegistry>,
+        ts_resync: bool,
+    ) -> Result<Self> {
         fs::create_dir_all(&out_dir)
             .with_context(|| format!("create channel dir {}", out_dir.display()))?;
         let next = scan_next_ts_number(&out_dir);
@@ -35,6 +41,9 @@ impl TsStitcher {
         );
         Ok(Self {
             out_dir,
+            channel_id: channel_id.to_string(),
+            retention,
+            ts_resync,
             window_segments: window_segments.max(1),
             continuity: ContinuityState::default(),
             next_segment_number: next,
@@ -55,12 +64,31 @@ impl TsStitcher {
         Ok(())
     }
 
+    /// Advance segment numbering without writing `.ts` (missing/corrupt HLS segment).
+    pub fn skip_segment(&mut self, duration_secs: f64) -> Result<u64> {
+        let number = self.next_segment_number;
+        let dur = if duration_secs.is_finite() && duration_secs > 0.0 {
+            duration_secs
+        } else {
+            2.0
+        };
+        let _ = fs::write(
+            self.out_dir.join(format!("seg_{number}.dur")),
+            format!("{dur}"),
+        );
+        self.next_segment_number = number.saturating_add(1);
+        self.prune_window();
+        warn!(number, duration_secs = dur, "skipped TS segment (no media file)");
+        Ok(number)
+    }
+
     /// Ingest one HLS `.ts` segment: align packets, rewrite CC, write `seg_N.ts` + duration.
     pub fn push_segment(&mut self, raw: &[u8], duration_secs: f64) -> Result<u64> {
-        let mut ts = align_ts_packets(raw)?;
+        let ts = self.prepare_ts(raw)?;
         if ts.is_empty() {
             bail!("empty TS segment after alignment");
         }
+        let mut ts = ts;
         self.continuity.rewrite(&mut ts);
 
         let number = self.next_segment_number;
@@ -80,34 +108,23 @@ impl TsStitcher {
         debug!(number, bytes = ts.len(), duration_secs = dur, "wrote continuous TS segment");
         Ok(number)
     }
-}
 
-fn align_ts_packets(raw: &[u8]) -> Result<Vec<u8>> {
-    // Find first sync byte.
-    let start = raw
-        .iter()
-        .position(|&b| b == 0x47)
-        .ok_or_else(|| anyhow::anyhow!("no MPEG-TS sync byte 0x47 in segment"))?;
-    let aligned = &raw[start..];
-    let n = aligned.len() / TS_PACKET_SIZE;
-    if n == 0 {
-        bail!("segment shorter than one TS packet");
-    }
-    let mut out = aligned[..n * TS_PACKET_SIZE].to_vec();
-    // Drop packets that lost sync mid-stream.
-    let mut i = 0;
-    while i + TS_PACKET_SIZE <= out.len() {
-        if out[i] != 0x47 {
-            // Truncate at first bad packet boundary.
-            out.truncate(i);
-            break;
+    fn prepare_ts(&self, raw: &[u8]) -> Result<Vec<u8>> {
+        if self.ts_resync {
+            let (ts, stats) = repair_ts_packets(raw)?;
+            if stats.packets_dropped > 0 || stats.resync_count > 0 {
+                warn!(
+                    packets_kept = stats.packets_kept,
+                    packets_dropped = stats.packets_dropped,
+                    resync_count = stats.resync_count,
+                    "TS packet repair applied"
+                );
+            }
+            Ok(ts)
+        } else {
+            align_ts_packets_truncate(raw)
         }
-        i += TS_PACKET_SIZE;
     }
-    if out.is_empty() {
-        bail!("no valid TS packets after sync check");
-    }
-    Ok(out)
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
@@ -140,7 +157,6 @@ fn wipe_ts_media(out_dir: &Path) -> Result<()> {
         {
             let _ = fs::remove_file(&path);
         }
-        // Leftover CMAF from a previous dash-mode run.
         if name == "init.mp4"
             || name == "index.mpd"
             || (name.starts_with("seg_") && name.ends_with(".m4s"))
@@ -175,8 +191,12 @@ fn parse_ts_seg_number(name: &str) -> Option<u64> {
 impl TsStitcher {
     fn prune_window(&mut self) {
         let keep = self.window_segments as u64;
+        let floor = self.retention.safe_prune_floor(&self.channel_id);
         while self.next_segment_number.saturating_sub(self.window_start) > keep + 2 {
             let old = self.window_start;
+            if old >= floor {
+                break;
+            }
             let _ = fs::remove_file(self.out_dir.join(format!("seg_{old}.ts")));
             let _ = fs::remove_file(self.out_dir.join(format!("seg_{old}.dur")));
             self.window_start = old.saturating_add(1);
@@ -187,15 +207,24 @@ impl TsStitcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::RetentionRegistry;
 
     #[test]
-    fn align_finds_sync_and_truncates() {
-        let mut raw = vec![0x00, 0x01];
-        raw.extend_from_slice(&[0x47u8; 188]);
-        raw.extend_from_slice(&[0x47u8; 188]);
-        raw.push(0xff); // trailing junk
-        let out = align_ts_packets(&raw).unwrap();
-        assert_eq!(out.len(), 376);
-        assert_eq!(out[0], 0x47);
+    fn prune_respects_retention_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let retention = Arc::new(RetentionRegistry::new(2));
+        retention.touch_seg("ch1", 5);
+        let mut stitcher = TsStitcher {
+            out_dir: dir.path().to_path_buf(),
+            channel_id: "ch1".into(),
+            retention,
+            ts_resync: true,
+            window_segments: 2,
+            continuity: ContinuityState::default(),
+            next_segment_number: 10,
+            window_start: 1,
+        };
+        stitcher.prune_window();
+        assert_eq!(stitcher.window_start, 3);
     }
 }
