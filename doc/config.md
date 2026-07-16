@@ -34,8 +34,8 @@ mpegts:
 reconnect_secs: 3
 
 pull:
-  - url: "http://108.181.13.127:61880/cc/sh_012/index.m3u8"
-    channel: "cctv1"
+  - url: "http://origin.example.com/cc/sh_012/index.m3u8"
+    channel: "demo"
     enable: true
 ```
 
@@ -66,4 +66,4 @@ pull:
 | `dash` | `http://<host>:<port>/live/<channel>/index.mpd` |
 | `mpegts` | `http://<host>:<port>/live/<channel>/mpegts` |
 
-例：`channel: "cctv1"` + 來源 `…/sh_012/index.m3u8` → 播放 `…/live/cctv1/index.mpd`。
+例：`channel: "demo"` + 來源 `…/sh_012/index.m3u8` → 播放 `…/live/demo/index.mpd`。
