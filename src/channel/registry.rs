@@ -1,6 +1,8 @@
 //! Runtime channel registry: CRUD + instant enable/disable.
 
-use crate::config::{is_safe_channel, CacheConfig, Config, PullSource};
+use crate::config::{
+    is_safe_channel, CacheConfig, Config, MpegTsConfig, OutputMode, PullSource,
+};
 use crate::hls::{self, ErrorSlot};
 use anyhow::{bail, Result};
 use reqwest::Client;
@@ -40,6 +42,8 @@ pub struct ChannelRegistry {
     cache_dir: PathBuf,
     cache: CacheConfig,
     reconnect_secs: u64,
+    output_mode: OutputMode,
+    mpegts: MpegTsConfig,
     http: Client,
 }
 
@@ -51,6 +55,8 @@ impl ChannelRegistry {
             cache_dir: cfg.cache.dir.clone(),
             cache: cfg.cache.clone(),
             reconnect_secs: cfg.reconnect_secs.max(1),
+            output_mode: cfg.output_mode,
+            mpegts: cfg.mpegts.clone(),
             http: Client::builder()
                 .user_agent("hls2dash/0.1")
                 .build()
@@ -228,6 +234,8 @@ impl ChannelRegistry {
         let out_dir = self.cache_dir.join("live").join(id);
         let cache = self.cache.clone();
         let reconnect_secs = self.reconnect_secs;
+        let output_mode = self.output_mode;
+        let mpegts = self.mpegts.clone();
         let last_error = Arc::clone(&entry.last_error);
         let token = cancel.clone();
 
@@ -243,6 +251,8 @@ impl ChannelRegistry {
                 out_dir,
                 cache,
                 reconnect_secs,
+                output_mode,
+                mpegts,
                 token,
                 last_error,
             )

@@ -20,6 +20,7 @@ CFG="${ROOT}/script/.smoke/config.yaml"
 mkdir -p "${ROOT}/script/.smoke"
 
 cat >"$CFG" <<EOF
+output_mode: dash
 dash:
   listen: "127.0.0.1"
   port: ${PORT}

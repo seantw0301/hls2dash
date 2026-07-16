@@ -2,6 +2,9 @@
 /cache/
 /dist/
 /config.yaml
+/config_pre.yaml
+/config.yaml.review.bak.*
+/config_pre.yaml.review.bak.*
 /script/hls2dash.pid
 /script/hls2dash.log
 /script/.smoke/

@@ -2,12 +2,14 @@
 
 [中文](./README_TW.md)
 
-Pure-Rust **HLS → live MPEG-DASH** service: pull live HLS (MPEG-TS), remux to DASH (`index.mpd` + CMAF/fMP4).
+Pure-Rust **HLS → live MPEG-DASH or continuous MPEG-TS** service: pull live HLS (MPEG-TS), remux to CMAF, then egress as either DASH or continuous MPEG-TS (`output_mode` in config).
 
 - **Codec**: H.264 + AAC only (passthrough, no re-encode)
 - **Control**: live channel CRUD + enable/disable via HTTP API
 - **Retry**: failed pulls retry on a global interval until `enable: false`
-- **Egress**: same URLs as [rtmp2dash](https://github.com/seantw0301/rtmp2dash)
+- **Egress (2選1)**:
+  - `output_mode: dash` → demux → CMAF → `/live/<channel>/index.mpd`
+  - `output_mode: mpegts` → **direct** HLS `.ts` stitch → `/live/<channel>/mpegts` (no CMAF; trans_server-aligned URL)
 - **No ffmpeg at runtime**
 
 **License: [MIT License](./LICENSE)**

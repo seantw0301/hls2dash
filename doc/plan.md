@@ -10,8 +10,9 @@
 
 | Surface | Contract |
 |---------|----------|
-| MPD | `http://<host>:<dash.port>/live/<channel>/index.mpd` |
-| Media | `/live/<channel>/init.mp4`, `/live/<channel>/seg_N.m4s` |
+| MPD | `http://<host>:<dash.port>/live/<channel>/index.mpd` (`output_mode: dash`) |
+| MPEG-TS | `http://<host>:<dash.port>/live/<channel>/mpegts` (`output_mode: mpegts`, aligned with trans_server) |
+| Media (dash) | `/live/<channel>/init.mp4`, `/live/<channel>/seg_N.m4s` |
 | Discovery | `GET /channels` → `{"channels":[{"id","mpd"}]}` |
 | Health | `GET /healthz` |
 | Metrics | `GET /metrics` → `hls2dash_active_channels N` |

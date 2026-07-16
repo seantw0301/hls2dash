@@ -1,6 +1,9 @@
-# Public example only — copy to config.yaml for local use.
-# HARD RULE: never put real production HLS URLs in this file or any tracked path.
-# See doc/layout.md
+# Egress mode: dash | mpegts (exactly one).
+# dash   → http://host:port/live/<channel>/index.mpd
+# mpegts → http://host:port/live/<channel>/mpegts
+#   (direct HLS .ts stitch → continuous TS; no CMAF)
+output_mode: dash
+
 dash:
   listen: "0.0.0.0"
   port: 8080
@@ -11,9 +14,21 @@ cache:
   window_segments: 90
   cleanup_interval_secs: 180
 
+# Used when output_mode: mpegts (trans_server-aligned knobs).
+mpegts:
+  live_holdback_segments: 6
+  min_buffer_segments: 3
+  max_segment_lag: 10
+  send_queue: 32
+  poll_interval_secs: 2
+  pace_egress: true
+  ingest_poll_factor: 0.25
+
+# Global: fail → wait N seconds → retry (all channels).
 reconnect_secs: 3
 
 pull:
-  - url: "http://origin.example.com/live/stream/index.m3u8"
-    channel: "demo"
+  # url path (e.g. sh_012) ≠ playback channel name.
+  - url: "http://origin.example.com/cc/sh_012/index.m3u8"
+    channel: "cctv1"
     enable: true

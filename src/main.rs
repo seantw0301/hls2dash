@@ -5,9 +5,10 @@ mod dash;
 mod demux;
 mod hls;
 mod http;
+mod mpegts;
 
 use crate::channel::ChannelRegistry;
-use crate::config::Config;
+use crate::config::{Config, OutputMode};
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(
     name = "hls2dash",
-    about = "HLS pull → live MPEG-DASH (H.264 + AAC)"
+    about = "HLS pull → live MPEG-DASH or continuous MPEG-TS (H.264 + AAC)"
 )]
 struct Cli {
     /// Path to YAML config file
@@ -50,11 +51,20 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cfg.cache.dir)
         .with_context(|| format!("create cache dir {}", cfg.cache.dir.display()))?;
 
-    info!(
-        dash = %format!(
+    let play = match cfg.output_mode {
+        OutputMode::Dash => format!(
             "http://{}:{}/live/<channel>/index.mpd",
             cfg.dash.listen, cfg.dash.port
         ),
+        OutputMode::Mpegts => format!(
+            "http://{}:{}/live/<channel>/mpegts",
+            cfg.dash.listen, cfg.dash.port
+        ),
+    };
+
+    info!(
+        output_mode = cfg.output_mode.as_str(),
+        play = %play,
         pull_sources = cfg.pull.len(),
         cache = %cfg.cache.dir.display(),
         segment_duration_secs = cfg.cache.segment_duration_secs,

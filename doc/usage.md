@@ -18,7 +18,11 @@ curl -s http://127.0.0.1:8080/healthz
 curl -s http://127.0.0.1:8080/channels
 ```
 
-播放：`http://127.0.0.1:8080/live/demo/index.mpd`
+播放：
+
+- DASH（`output_mode: dash`）：`http://127.0.0.1:8080/live/demo/index.mpd`
+- MPEG-TS（`output_mode: mpegts`）：`http://127.0.0.1:8080/live/demo/mpegts`
+
 
 ## Channel API
 
@@ -56,13 +60,20 @@ SMOKE_HLS_URL="http://origin.example.com/live/stream/index.m3u8" ./script/smoke_
 
 ## 互動選台（VLC）
 
-指定範圍（例如 `20 50` → `sh_020`–`sh_050`），逐一用 VLC 播放；選 `y` 並輸入 channel id 後，**append** 到既有 `config.yaml` 的 `pull:`。
+指定範圍（例如 `20 50` → `sh_020`–`sh_050`），逐一用 VLC 播放；選 `y` 並輸入 channel id 後，**append** 到 `config_pre.yaml`（既有 `pull:` **不會被覆寫**；僅第一次不存在時建立骨架）。
 
 必須設定 `BASE_URL`（你的 HLS 來源前綴）：
 
 ```bash
 BASE_URL="http://origin.example.com/cc" ./script/review_channels.sh 20 50
 BASE_URL="http://origin.example.com/cc" ./script/review_channels.sh 100 120
-# 或指定輸出路徑
-BASE_URL="http://origin.example.com/cc" ./script/review_channels.sh -o ./config.yaml 1 20
+# 自訂輸出路徑（預設已是 config_pre.yaml）
+BASE_URL="http://origin.example.com/cc" ./script/review_channels.sh -o ./config_pre.yaml 1 20
+```
+
+確認後再套用到執行設定：
+
+```bash
+cp config_pre.yaml config.yaml
+./script/start.sh
 ```

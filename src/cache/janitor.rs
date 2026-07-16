@@ -111,14 +111,16 @@ fn sweep_channel(channel_dir: &Path, now: SystemTime, ttl: Duration, mut budget:
             continue;
         }
 
-        let is_segment = name.starts_with("seg_") && name.ends_with(".m4s");
+        let is_segment = name.starts_with("seg_")
+            && (name.ends_with(".m4s") || name.ends_with(".ts") || name.ends_with(".dur"));
         if !is_segment {
             continue;
         }
 
         if file_is_expired(&path, now, ttl) {
             expired_segs.push(path);
-        } else {
+        } else if name.ends_with(".m4s") || name.ends_with(".ts") {
+            // `.dur` sidecars do not count toward live segment presence.
             segment_remaining += 1;
         }
     }

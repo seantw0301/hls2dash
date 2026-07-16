@@ -2,12 +2,14 @@
 
 [English](./README.md)
 
-純 Rust 的 **HLS → live MPEG-DASH** 服務：拉取 live HLS（MPEG-TS），remux 成 DASH（`index.mpd` + CMAF/fMP4）。
+純 Rust 的 **HLS → live MPEG-DASH 或連續 MPEG-TS** 服務：拉取 live HLS，內部 remux 成 CMAF，再依 `output_mode` 二選一輸出。
 
 - **Codec**：固定 H.264 + AAC（passthrough，不重編碼）
 - **控制**：HTTP API 即時 CRUD / enable / disable
 - **重試**：拉流失敗依全域間隔重試，直到 `enable: false`
-- **輸出**：與 [rtmp2dash](https://github.com/seantw0301/rtmp2dash) 相同路徑
+- **輸出（二選一）**：
+  - `output_mode: dash` → demux → CMAF → `/live/<channel>/index.mpd`
+  - `output_mode: mpegts` → **直接** HLS `.ts` stitch → `/live/<channel>/mpegts`（不經 CMAF）
 - **執行期不依賴 ffmpeg**
 
 **授權：[MIT License](./LICENSE)** — 本專案依 MIT 開源。

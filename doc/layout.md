@@ -33,5 +33,6 @@
 | `hls` | playlist poll、下載、重試迴圈 |
 | `demux` | MPEG-TS → AccessUnit |
 | `dash` | CMAF + live `index.mpd` |
-| `http` | DASH 服務 + `/api/channels` |
+| `mpegts` | HLS `.ts` stitch → continuous `/mpegts`（不經 CMAF；egress 對齊 trans_server） |
+| `http` | DASH / MPEG-TS 服務 + `/api/channels` |
 | `cache` | TTL janitor |
